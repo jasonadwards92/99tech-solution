@@ -1,0 +1,27 @@
+# Exposed through an ALB created by the AWS Load Balancer Controller.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: backend
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/certificate-arn: {{ .Values.ingress.certificateArn | quote }}
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    # On deregistration, give in-flight requests up to 30s to finish (default 300s).
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=30
+spec:
+  ingressClassName: alb
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  name: http

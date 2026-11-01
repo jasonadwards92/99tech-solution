@@ -1,0 +1,5 @@
+apiVersion: v2
+name: backend
+description: Backend HTTP API
+type: application
+version: 1.0.0

@@ -1,0 +1,7 @@
+# Changes to pipelines and deploy files need a review from the platform team.
+# Pair with branch protection on main: "Require review from Code Owners".
+# Replace the example team with the real one.
+/.github/                 @example-org/platform-team
+/backend/chart/           @example-org/platform-team
+**/Dockerfile             @example-org/platform-team
+**/CLAUDE.md              @example-org/platform-team

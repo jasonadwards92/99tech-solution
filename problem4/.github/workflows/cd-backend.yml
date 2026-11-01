@@ -1,0 +1,178 @@
+# CD for the backend API on EKS.
+#   merge to main -> build image once, push to ECR (tooling account)
+#                 -> helm upgrade on staging EKS (staging account)
+#                 -> [approval] -> helm upgrade on production EKS (production account)
+# Rollback: git revert on main (any age), or re-run only the deploy job of an earlier
+# successful run (within GitHub's 30-day re-run window).
+name: cd-backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/cd-backend.yml"
+
+permissions: {}
+
+env:
+  RELEASE_SHA: ${{ github.sha }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # OIDC -> build role in the tooling account
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Assume build role (tooling account)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_BUILD_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+        with:
+          mask-password: "true"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Tagged with the commit SHA; the ECR repo has immutable tags and scan-on-push.
+      - name: Build and push image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: backend
+          push: true
+          tags: ${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-staging:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: staging
+      url: ${{ vars.API_URL }}
+    concurrency: # one deploy per environment at a time, never cancelled half-way
+      group: cd-backend-staging
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # OIDC -> deploy role in the staging account
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Assume deploy role (staging account)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.22.1
+
+      - name: Connect to the staging EKS cluster
+        env:
+          EKS_CLUSTER: ${{ vars.EKS_CLUSTER }}
+        run: aws eks update-kubeconfig --name "${EKS_CLUSTER}"
+
+      # --atomic: if the new pods don't become ready in time, Helm rolls back by itself.
+      - name: Deploy with Helm
+        env:
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        run: |
+          helm upgrade --install backend backend/chart \
+            --namespace backend \
+            --values backend/chart/values-staging.yaml \
+            --set image.repository="${ECR_REPOSITORY}" \
+            --set image.tag="${RELEASE_SHA}" \
+            --atomic --wait --timeout 10m
+
+      - name: Smoke test
+        id: smoke
+        env:
+          API_URL: ${{ vars.API_URL }}
+        run: |
+          for _ in 1 2 3 4 5 6; do
+            if curl -fsS "${API_URL}/healthz" | grep -q "\"version\":\"${RELEASE_SHA}\""; then exit 0; fi
+            sleep 10
+          done
+          echo "::error::${API_URL}/healthz does not report version ${RELEASE_SHA}"
+          exit 1
+
+      # --atomic only covers pods that never become ready. A release that is up
+      # but fails the smoke test is rolled back here.
+      - name: Roll back if the smoke test failed
+        if: failure() && steps.smoke.outcome == 'failure'
+        run: helm rollback backend --namespace backend --wait --timeout 10m
+
+  deploy-production:
+    needs: deploy-staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: production # required reviewers are set on this environment
+      url: ${{ vars.API_URL }}
+    concurrency:
+      group: cd-backend-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # OIDC -> deploy role in the production account
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Assume deploy role (production account)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.22.1
+
+      - name: Connect to the production EKS cluster
+        env:
+          EKS_CLUSTER: ${{ vars.EKS_CLUSTER }}
+        run: aws eks update-kubeconfig --name "${EKS_CLUSTER}"
+
+      - name: Deploy with Helm
+        env:
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        run: |
+          helm upgrade --install backend backend/chart \
+            --namespace backend \
+            --values backend/chart/values-production.yaml \
+            --set image.repository="${ECR_REPOSITORY}" \
+            --set image.tag="${RELEASE_SHA}" \
+            --atomic --wait --timeout 10m
+
+      - name: Smoke test
+        id: smoke
+        env:
+          API_URL: ${{ vars.API_URL }}
+        run: |
+          for _ in 1 2 3 4 5 6; do
+            if curl -fsS "${API_URL}/healthz" | grep -q "\"version\":\"${RELEASE_SHA}\""; then exit 0; fi
+            sleep 10
+          done
+          echo "::error::${API_URL}/healthz does not report version ${RELEASE_SHA}"
+          exit 1
+
+      # --atomic only covers pods that never become ready. A release that is up
+      # but fails the smoke test is rolled back here.
+      - name: Roll back if the smoke test failed
+        if: failure() && steps.smoke.outcome == 'failure'
+        run: helm rollback backend --namespace backend --wait --timeout 10m

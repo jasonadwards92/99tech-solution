@@ -1,0 +1,15 @@
+replicaCount: 3
+
+serviceAccount:
+  roleArn: arn:aws:iam::<production-account-id>:role/backend-app-production
+
+ingress:
+  host: api.example.com
+  certificateArn: arn:aws:acm:<region>:<production-account-id>:certificate/<id>
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    memory: 1Gi

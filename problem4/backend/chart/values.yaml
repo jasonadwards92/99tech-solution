@@ -1,0 +1,21 @@
+# Defaults shared by every environment. values-<env>.yaml overrides them.
+image:
+  repository: ""  # set by the pipeline: the ECR repository URI
+  tag: ""         # set by the pipeline: the commit SHA
+
+replicaCount: 2
+
+# IRSA: the app's own AWS permissions (e.g. Secrets Manager), one IAM role per environment.
+serviceAccount:
+  roleArn: ""
+
+ingress:
+  host: ""
+  certificateArn: ""
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    memory: 512Mi

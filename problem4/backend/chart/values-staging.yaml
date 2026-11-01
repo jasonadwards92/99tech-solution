@@ -1,0 +1,8 @@
+replicaCount: 2
+
+serviceAccount:
+  roleArn: arn:aws:iam::<staging-account-id>:role/backend-app-staging
+
+ingress:
+  host: api.staging.example.com
+  certificateArn: arn:aws:acm:<region>:<staging-account-id>:certificate/<id>
